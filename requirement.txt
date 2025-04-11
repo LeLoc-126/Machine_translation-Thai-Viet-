@@ -7,3 +7,7 @@ transformers
 matplotlib
 langdetect
 datasets
+tdqm
+sacrebleu
+tiktoken
+protobuf
