@@ -1,134 +1,89 @@
+import pickle
 import duckdb
-import torch
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-import pandas as pd
+from transformers import AutoTokenizer
 from tqdm import tqdm
-import os
-import gc
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-
+# Load the tokenizer
 tokenizer = AutoTokenizer.from_pretrained("facebook/nllb-200-distilled-1.3B")
-model = AutoModelForSeq2SeqLM.from_pretrained("facebook/nllb-200-distilled-1.3B").to(device)
 
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+# Set up DB connection
+db_path = '/home/leloc/Document/USTH/Thesis/translation.db'
+con = duckdb.connect(db_path)
 
-# Sử dụng FP16 để tiết kiệm VRAM
-model = model.half().to("cuda")
+# Verify schema
+schema_check = con.execute("PRAGMA table_info(translations)").fetchall()
+required_columns = {"thai", "viet", "thai_input_ids", "thai_attention_mask", "vi_input_ids", "vi_attention_mask"}
+actual_columns = {col[1] for col in schema_check}
+if not required_columns.issubset(actual_columns):
+    raise ValueError(f"Database schema missing required columns: {required_columns - actual_columns}")
 
-# Kết nối DuckDB
-con = duckdb.connect("translation.db")
+# Function to tokenize a batch and update the database
+def tokenize_batch(batch_start, batch_size, db_path, tokenizer, con):
+    try:
+        # Load batch from database
+        df = con.execute(f"""
+            SELECT rowid AS id, thai, viet
+            FROM translations
+            LIMIT {batch_size} OFFSET {batch_start}
+        """).fetchdf()
 
-# Lấy dữ liệu tiếng Thái
-df = con.execute("SELECT thai FROM translations").fetchdf()
+        if df.empty:
+            print(f"No data found for batch starting at {batch_start}")
+            return
 
-# Thiết lập mã ngôn ngữ
-tokenizer.src_lang = "tha_Thai"
-tgt_lang_code = "vie_Latn"
-forced_bos_token_id = tokenizer.convert_tokens_to_ids(tgt_lang_code)
-
-# Hàm chia batch
-def chunks(lst, batch_size):
-    for i in range(0, len(lst), batch_size):
-        yield lst[i:i + batch_size]
-
-batch_size = 16
-all_results = []
-all_thai_tokens = []
-all_viet_tokens = []
-
-def tokenize_and_show(text, lang):
-    tokenizer.src_lang = lang
-    tokens = tokenizer.tokenize(text)
-    token_ids = tokenizer.convert_tokens_to_ids(tokens)
-    decoded = tokenizer.decode(token_ids)
-    return tokens, token_ids, decoded
-
-# Bắt đầu dịch theo batch
-for batch in tqdm(list(chunks(df["thai"].tolist(), batch_size)), desc="Translating", unit="batch"):
-    inputs = tokenizer(
-        batch,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=128
-    ).to("cuda")
-
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            forced_bos_token_id=forced_bos_token_id,
-            max_new_tokens=64
+        # Tokenize Thai
+        thai_tokens = tokenizer(
+            df["thai"].tolist(),
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            return_attention_mask=True,
+            add_special_tokens=True,
+            max_length=256
         )
 
-    translations = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+        # Tokenize Vietnamese
+        vi_tokens = tokenizer(
+            df["viet"].tolist(),
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            return_attention_mask=True,
+            add_special_tokens=True,
+            max_length=256
+        )
 
-    thai_tokens = []
-    viet_tokens = []
+        # Prepare data for insertion (match query order)
+        data = [
+            (
+                pickle.dumps(thai_tokens["input_ids"][i].numpy()),
+                pickle.dumps(thai_tokens["attention_mask"][i].numpy()),
+                pickle.dumps(vi_tokens["input_ids"][i].numpy()),
+                pickle.dumps(vi_tokens["attention_mask"][i].numpy()),
+                int(df.iloc[i]["id"])  # rowid last
+            )
+            for i in range(len(df))
+        ]
 
-    print("\n--- Tokenizing batch ---\n")
-    for i in tqdm(range(len(batch)), desc="Tokenizing", unit="sent", leave=False):
-        thai_text = batch[i]
-        viet_text = translations[i]
+        # Update the database
+        con.executemany("""
+            UPDATE translations
+            SET
+                thai_input_ids = ?, 
+                thai_attention_mask = ?, 
+                vi_input_ids = ?, 
+                vi_attention_mask = ?
+            WHERE rowid = ?
+        """, data)
 
-        # Thai tokenization
-        thai_subwords, thai_ids, thai_decoded = tokenize_and_show(thai_text, "tha_Thai")
-        # Vietnamese tokenization
-        viet_subwords, viet_ids, viet_decoded = tokenize_and_show(viet_text, "vie_Latn")
+    except Exception as e:
+        print(f"Error processing batch {batch_start}: {str(e)}")
 
-        thai_tokens.append(thai_ids)
-        viet_tokens.append(viet_ids)
+# Call the function for tokenizing and updating
+batch_size = 200  # Reduced for faster iteration
+total_rows = con.execute("SELECT COUNT(*) FROM translations").fetchone()[0]
+for batch_start in tqdm(range(0, total_rows, batch_size), desc="Tokenizing batches"):
+    tokenize_batch(batch_start, batch_size, db_path, tokenizer, con)
 
-        print(f"[THAI] {thai_text}")
-        print(f"  ▸ Subwords: {thai_subwords}")
-        print(f"  ▸ Token IDs: {thai_ids}")
-        print(f"  ▸ Decoded from IDs: {thai_decoded}")
-        print(f"[VIET] {viet_text}")
-        print(f"  ▸ Subwords: {viet_subwords}")
-        print(f"  ▸ Token IDs: {viet_ids}")
-        print(f"  ▸ Decoded from IDs: {viet_decoded}")
-        print("------")
-
-    all_results.extend(zip(batch, translations))
-    all_thai_tokens.extend(thai_tokens)
-    all_viet_tokens.extend(viet_tokens)
-
-    del inputs, outputs
-    torch.cuda.empty_cache()
-    gc.collect()
-
-# Chuẩn bị kết quả cuối cùng
-thai_list, viet_list = zip(*all_results)
-result_df = pd.DataFrame({
-    "thai": thai_list,
-    "viet_text": viet_list,
-    "thai_tokens": [str(x) for x in all_thai_tokens],
-    "viet_tokens": [str(x) for x in all_viet_tokens]
-})
-
-# Tạo bảng nếu chưa tồn tại
-con.execute("""
-    CREATE TABLE IF NOT EXISTS translated_tokenized (
-        thai TEXT,
-        thai_tokens TEXT,
-        viet_text TEXT,
-        viet_tokens TEXT
-    )
-""")
-
-# Ghi dữ liệu
-con.register("result_df_view", result_df)
-con.execute("INSERT INTO translated_tokenized SELECT * FROM result_df_view")
-
-print("\n==== Kết quả dịch thử ====")
-for i, row in result_df.iterrows():
-    print(f"[THAI] {row['thai']}")
-    print(f"[VIET] {row['viet_text']}")
-    print(f"[THAI TOKENS] {row['thai_tokens']}")
-    print(f"[VIET TOKENS] {row['viet_tokens']}")
-    print("------")
-
-# Dọn dẹp
-torch.cuda.empty_cache()
-gc.collect()
 con.close()
+print("✅ Tokenization and database update complete.")
