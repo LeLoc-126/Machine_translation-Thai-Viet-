@@ -11,3 +11,5 @@ tdqm
 sacrebleu
 tiktoken
 protobuf
+bitsandbytes
+duckdb
