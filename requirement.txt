@@ -13,3 +13,4 @@ tiktoken
 protobuf
 bitsandbytes
 duckdb
+nltk
