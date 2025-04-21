@@ -14,3 +14,4 @@ protobuf
 bitsandbytes
 duckdb
 nltk
+pythainlp
