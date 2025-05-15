@@ -2,6 +2,7 @@ import duckdb
 from transformers import AutoTokenizer
 import torch
 import pickle
+from tqdm import tqdm
 
 # Load the extended tokenizer
 tokenizer = AutoTokenizer.from_pretrained("~/nllb-1.3B-thai-extended-tokenizer")
@@ -23,7 +24,8 @@ df["viet"] = df["viet"].fillna("").astype(str)
 # Prepare Thai inputs with prepended language code
 thai_inputs = ["tha_Thai " + text for text in df["thai"].tolist()]
 
-# Re-tokenize Thai text
+# Re-tokenize Thai text with progress
+print("🔁 Tokenizing Thai...")
 thai_tokens = tokenizer(
     thai_inputs,
     return_tensors="pt",
@@ -34,7 +36,8 @@ thai_tokens = tokenizer(
     add_special_tokens=True
 )
 
-# Re-tokenize Vietnamese text (no language code for target labels)
+# Re-tokenize Vietnamese text with progress
+print("🔁 Tokenizing Vietnamese...")
 viet_tokens = tokenizer(
     df["viet"].tolist(),
     return_tensors="pt",
@@ -46,13 +49,15 @@ viet_tokens = tokenizer(
 )
 
 # Serialize token tensors to BLOB-compatible format
-thai_input_ids_blobs = [pickle.dumps(ids.numpy()) for ids in thai_tokens["input_ids"]]
-thai_attention_mask_blobs = [pickle.dumps(mask.numpy()) for mask in thai_tokens["attention_mask"]]
-vi_input_ids_blobs = [pickle.dumps(ids.numpy()) for ids in viet_tokens["input_ids"]]
-vi_attention_mask_blobs = [pickle.dumps(mask.numpy()) for mask in viet_tokens["attention_mask"]]
+print("📦 Serializing tokens...")
+thai_input_ids_blobs = [pickle.dumps(ids.numpy()) for ids in tqdm(thai_tokens["input_ids"], desc="Thai input_ids")]
+thai_attention_mask_blobs = [pickle.dumps(mask.numpy()) for mask in tqdm(thai_tokens["attention_mask"], desc="Thai attention_mask")]
+vi_input_ids_blobs = [pickle.dumps(ids.numpy()) for ids in tqdm(viet_tokens["input_ids"], desc="Vi input_ids")]
+vi_attention_mask_blobs = [pickle.dumps(mask.numpy()) for mask in tqdm(viet_tokens["attention_mask"], desc="Vi attention_mask")]
 
-# Update the database
-for i, row in df.iterrows():
+# Update the database with progress bar
+print("📝 Updating database...")
+for i, row in tqdm(df.iterrows(), total=len(df), desc="🔄 Updating DB"):
     con.execute("""
         UPDATE translations
         SET thai_input_ids = ?,
