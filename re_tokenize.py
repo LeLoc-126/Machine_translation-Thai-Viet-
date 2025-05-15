@@ -21,18 +21,26 @@ df = con.execute("""
 df["thai"] = df["thai"].fillna("").astype(str)
 df["viet"] = df["viet"].fillna("").astype(str)
 
-# Tokenize Thai (add language code)
+# Tokenize Thai with progress
 thai_inputs = ["tha_Thai " + text for text in df["thai"].tolist()]
-thai_tokens = tokenizer(thai_inputs, return_tensors="pt", padding=True, truncation=True, max_length=256, return_attention_mask=True)
+thai_input_ids_blobs = []
+thai_attention_mask_blobs = []
 
-# Tokenize Vietnamese
-viet_tokens = tokenizer(df["viet"].tolist(), return_tensors="pt", padding=True, truncation=True, max_length=256, return_attention_mask=True)
+print("🔠 Tokenizing Thai text...")
+for text in tqdm(thai_inputs, desc="🇹🇭 Thai", unit="sample"):
+    tokens = tokenizer(text, return_tensors="pt", padding="max_length", truncation=True, max_length=256, return_attention_mask=True)
+    thai_input_ids_blobs.append(pickle.dumps(tokens["input_ids"][0].numpy()))
+    thai_attention_mask_blobs.append(pickle.dumps(tokens["attention_mask"][0].numpy()))
 
-# Serialize to blob
-thai_input_ids_blobs = [pickle.dumps(x.numpy()) for x in thai_tokens["input_ids"]]
-thai_attention_mask_blobs = [pickle.dumps(x.numpy()) for x in thai_tokens["attention_mask"]]
-vi_input_ids_blobs = [pickle.dumps(x.numpy()) for x in viet_tokens["input_ids"]]
-vi_attention_mask_blobs = [pickle.dumps(x.numpy()) for x in viet_tokens["attention_mask"]]
+# Tokenize Vietnamese with progress
+vi_input_ids_blobs = []
+vi_attention_mask_blobs = []
+
+print("🔠 Tokenizing Vietnamese text...")
+for text in tqdm(df["viet"].tolist(), desc="🇻🇳 Vietnamese", unit="sample"):
+    tokens = tokenizer(text, return_tensors="pt", padding="max_length", truncation=True, max_length=256, return_attention_mask=True)
+    vi_input_ids_blobs.append(pickle.dumps(tokens["input_ids"][0].numpy()))
+    vi_attention_mask_blobs.append(pickle.dumps(tokens["attention_mask"][0].numpy()))
 
 # Prepare all data
 records = []
