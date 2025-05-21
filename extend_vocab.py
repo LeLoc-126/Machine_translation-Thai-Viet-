@@ -1,46 +1,62 @@
+import duckdb
+import os
+from collections import Counter
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+from pythainlp.tokenize import word_tokenize
 
-# Các ký tự bị thiếu
-missing_thai_chars = [
-    'ฌ', 'ฦ', 'ำ', '\u0e3b', '\u0e3c', '\u0e3d', '\u0e3e', '฿', 'ๅ', '๎', '๏',
-    '๐', '๑', '๒', '๓', '๔', '๕', '๖', '๗', '๘', '๙', '๚', '๛', '\u0e5c', '\u0e5d',
-    '\u0e5e', '\u0e5f', '\u0e60', '\u0e61', '\u0e62', '\u0e63', '\u0e64', '\u0e65',
-    '\u0e66', '\u0e67', '\u0e68', '\u0e69', '\u0e6a', '\u0e6b', '\u0e6c', '\u0e6d',
-    '\u0e6e', '\u0e6f', '\u0e70', '\u0e71', '\u0e72', '\u0e73', '\u0e74', '\u0e75',
-    '\u0e76', '\u0e77', '\u0e78', '\u0e79', '\u0e7a', '\u0e7b', '\u0e7c', '\u0e7d',
-    '\u0e7e', '\u0e7f'
-]
+db_path = "/sdd/lv01/leloc/translation_machine/translation.db"
+con = duckdb.connect(db_path)
 
-# Convert Unicode escape sequences to actual characters
-missing_thai_chars = [chr(int(c[2:], 16)) if c.startswith('\\u') else c for c in missing_thai_chars]
+def build_vocab(con, table, column, is_thai=False, min_freq=2):
+    counter = Counter()
+    query = f"SELECT {column} FROM {table}"
+    for (text,) in con.execute(query).fetchall():
+        if not text:
+            continue
+        words = word_tokenize(text, engine="newmm") if is_thai else text.split()
+        words = [w for w in words if len(w) >= 2 and w.isalpha()]
+        counter.update(words)
+    return counter
+thai_counter = build_vocab(con, "translations", "thai", is_thai=True, min_freq=2)
+viet_counter = build_vocab(con, "translations", "viet", is_thai=False, min_freq=2)
 
-# Load tokenizer
-tokenizer = AutoTokenizer.from_pretrained("facebook/nllb-200-distilled-1.3B")
+combined_counter = thai_counter + viet_counter
+filtered_vocab = {word for word, count in combined_counter.items() if count >= 2}
 
-# Lọc những token chưa có trong tokenizer
-new_tokens = [c for c in missing_thai_chars if tokenizer.convert_tokens_to_ids(c) == tokenizer.unk_token_id]
-print(f"Số ký tự cần thêm: {len(new_tokens)}")
-print(f"Ký tự cần thêm: {new_tokens}")
+model_name = "facebook/nllb-200-distilled-1.3B"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
 
-# Thêm token mới
-tokenizer.add_tokens(new_tokens)
-print("✅ Tokenizer đã được mở rộng.")
+token_split_score = {}
+for word in filtered_vocab:
+    if len(word) < 2 or not word.isalpha():
+        continue
+    split_len = len(tokenizer.tokenize(word))
+    if split_len > 1:
+        token_split_score[word] = split_len
 
-# Load model
-model = AutoModelForSeq2SeqLM.from_pretrained("facebook/nllb-200-distilled-1.3B")
+sorted_tokens = sorted(token_split_score.items(), key=lambda x: (-x[1], -combined_counter[x[0]]))
+new_tokens = [w for w, _ in sorted_tokens[:5000]]
 
-# Resize model embeddings
-model.resize_token_embeddings(len(tokenizer))
+print(f"🆕 Số lượng token được thêm: {len(new_tokens)}")
 
-# Test tokenization
-test_input = "tha_Thai สวัสดี ฌ ฦ ำ ๑ ฿"
-tokenized = tokenizer(test_input, return_tensors="pt")
-print("Tokenized IDs:", tokenized.input_ids)
-print("Tokens:", tokenizer.convert_ids_to_tokens(tokenized.input_ids[0]))
+if new_tokens:
+    tokenizer.add_tokens(new_tokens)
+    model.resize_token_embeddings(len(tokenizer))
+    print("✅ Tokenizer đã được mở rộng và model đã resize.")
 
-# Lưu tokenizer và model
-tokenizer.save_pretrained("~/nllb-1.3B-thai-extended-tokenizer")
-model.save_pretrained("~/nllb-1.3B-thai-extended-model")
-print("✅ Tokenizer và model đã được lưu.")
+    # 8. Lưu
+    tokenizer_dir = "tokenizer-nllb-extended"
+    model_dir = "nllb-extended"
+    os.makedirs(tokenizer_dir, exist_ok=True)
+    os.makedirs(model_dir, exist_ok=True)
+    tokenizer.save_pretrained(tokenizer_dir)
+    model.save_pretrained(model_dir)
 
-# Note: Fine-tuning is required next (add your dataset and fine-tuning code here)
+    # 9. Nén lại
+    os.system(f"zip -r tokenizer-nllb-extended.zip {tokenizer_dir}")
+    os.system(f"zip -r nllb-extended.zip {model_dir}")
+    print("📦 Đã lưu và nén tokenizer + model mở rộng.")
+else:
+    print("⚠️ Không có token mới cần thêm.")
+
