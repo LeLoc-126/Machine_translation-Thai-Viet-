@@ -2,6 +2,7 @@ from transformers import AutoTokenizer
 import duckdb
 import pandas as pd
 from tqdm import tqdm
+import pickle
 
 # === Config ===
 tokenizer_path = "/sdd/lv01/leloc/translation_machine/model/tokenizer-nllb-extended"
@@ -49,8 +50,8 @@ for offset in progress:
         LIMIT {batch_size} OFFSET {offset}
     """).fetch_df()
 
-    df["thai_input_ids"] = tokenize_column(df["Thai"].tolist(), "tha_Thai")
-    df["vi_input_ids"] = tokenize_column(df["Viet"].tolist(), "vie_Latn")
+    df["thai_input_ids"] = df["thai_input_ids"].apply(lambda x: pickle.dumps(x))
+    df["vi_input_ids"] = df["vi_input_ids"].apply(lambda x: pickle.dumps(x))
 
     con.register("batch_df", df)
     con.execute(f"""
