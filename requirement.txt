@@ -1,0 +1,17 @@
+torch
+torchvision
+torchaudio
+pandas
+numpy
+transformers
+matplotlib
+langdetect
+datasets
+tdqm
+sacrebleu
+tiktoken
+protobuf
+bitsandbytes
+duckdb
+nltk
+pythainlp
